@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Stream Capture (Firefox)</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="header">
+    <h1>🎬 Stream Capture</h1>
+    <div class="actions">
+      <button id="refresh" title="Refresh">🔄</button>
+      <button id="clear" title="Clear All">🗑️</button>
+      <button id="copy-all" title="Copy All URLs with Headers">📋</button>
+      <button id="export" title="Export JSON">📥</button>
+    </div>
+  </div>
+  <div class="stats"><span id="stream-count">0 streams captured</span></div>
+  <div class="search-bar">
+    <input type="text" id="search-input" placeholder="Search URLs, types, resolutions..." />
+    <button id="clear-search" title="Clear search">✕</button>
+  </div>
+  <div class="filters">
+    <button class="filter-btn active" data-filter="all">All</button>
+    <button class="filter-btn" data-filter="m3u8">M3U8</button>
+    <button class="filter-btn" data-filter="mpd">MPD</button>
+    <button class="filter-btn" data-filter="youtube">YouTube</button>
+    <button class="filter-btn" data-filter="drm">DRM</button>
+    <label class="toggle-adv"><input type="checkbox" id="advToggle" /> Advanced</label>
+  </div>
+  <div id="streams-list" class="streams-list">
+    <div class="empty-state"><p>No streams captured yet.</p><p class="hint">Open a video site and start playback.</p></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
