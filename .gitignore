@@ -1,0 +1,21 @@
+*.mp4
+
+*.7z
+
+# Ignore only JSON files inside groww_tools (top-level and nested)
+
+
+*.txt
+
+*.log
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Common Python tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
