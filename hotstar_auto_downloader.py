@@ -2,6 +2,8 @@
 """
 Hotstar Auto Downloader with Playwright
 Monitors network traffic, detects M3U8 playlists, injects download UI
+best version
+
 """
 
 import asyncio
@@ -19,7 +21,7 @@ import urllib.request
 import zipfile
 
 class HotstarDownloader:
-    def __init__(self, downloads_dir="downloads"):
+    def __init__(self, downloads_dir="downloads", reset_profile=False):
         self.downloads_dir = Path(downloads_dir)
         self.downloads_dir.mkdir(exist_ok=True)
         self.captured_playlists = []
@@ -29,6 +31,10 @@ class HotstarDownloader:
         self.profile_dir = Path(tempfile.gettempdir()) / "hotstar_firefox_profile"
         self.extensions_dir = Path("browser_extensions")
         self.extensions_dir.mkdir(exist_ok=True)
+        self.reset_profile = reset_profile
+        self.downloading_urls = set()  # Track URLs being downloaded to prevent duplicates
+        self.audio_m3u8_urls = []  # Track detected audio M3U8 URLs
+        self.video_m3u8_urls = []  # Track detected video M3U8 URLs
     
     def download_ublock_extension(self):
         """Download uBlock Origin XPI for Firefox"""
@@ -57,6 +63,11 @@ class HotstarDownloader:
             print("⚠️  No extension to install")
             return None
         
+        # Reset profile if requested
+        if self.reset_profile and self.profile_dir.exists():
+            print(f"🔄 Resetting Firefox profile: {self.profile_dir}")
+            shutil.rmtree(self.profile_dir, ignore_errors=True)
+        
         # Create profile directory
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         
@@ -81,6 +92,20 @@ class HotstarDownloader:
             # Detect M3U8 playlist responses
             if ('.m3u8' in url or 'mpegurl' in content_type.lower()):
                 try:
+                    # Extract fresh headers from this response
+                    request = response.request
+                    fresh_headers = dict(request.headers)
+                    
+                    # Log ALL M3U8 URLs for debugging audio detection
+                    if '/audio_' in url or '/audio/' in url:
+                        print(f"🎵 Detected AUDIO M3U8: {url[:120]}...")
+                        if url not in self.audio_m3u8_urls:
+                            self.audio_m3u8_urls.append({'url': url, 'headers': fresh_headers})
+                    elif '/video_' in url or '/video/' in url:
+                        print(f"📹 Detected VIDEO M3U8: {url[:120]}...")
+                        if url not in self.video_m3u8_urls:
+                            self.video_m3u8_urls.append({'url': url, 'headers': fresh_headers})
+                    
                     body = await response.text()
                     
                     # Check if it's a master playlist with quality variants
@@ -89,7 +114,15 @@ class HotstarDownloader:
                         
                         # Save playlist content to file
                         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        playlist_file = self.downloads_dir / f"playlist_{timestamp}.m3u8"
+                        
+                        # Use descriptive filename based on URL
+                        if '/audio_' in url or '/audio/' in url:
+                            playlist_file = self.downloads_dir / f"audio_playlist_{timestamp}.m3u8"
+                        elif '/video_' in url or '/video/' in url:
+                            playlist_file = self.downloads_dir / f"video_playlist_{timestamp}.m3u8"
+                        else:
+                            playlist_file = self.downloads_dir / f"playlist_{timestamp}.m3u8"
+                        
                         playlist_file.write_text(body, encoding='utf-8')
                         print(f"💾 Saved playlist to: {playlist_file}")
                         
@@ -99,7 +132,7 @@ class HotstarDownloader:
                         
                         # Create HAR file
                         har_data = self.create_har_from_request(request, response, body)
-                        har_file = self.downloads_dir / f"playlist_{timestamp}.har"
+                        har_file = playlist_file.with_suffix('.har')
                         har_file.write_text(json.dumps(har_data, indent=2), encoding='utf-8')
                         print(f"💾 Saved HAR to: {har_file}")
                         
@@ -132,15 +165,54 @@ class HotstarDownloader:
                         
                         self.captured_playlists.append(playlist_info)
                         
-                        # Auto-download the best quality
+                        # Auto-download the best quality (prevent duplicates)
                         if variants:
                             best_variant = max(variants, key=lambda x: x['bandwidth'])
+                            variant_url = best_variant['url']
+                            
+                            # Skip if already downloading this URL
+                            if variant_url in self.downloading_urls:
+                                print(f"⏭️  Skipping duplicate download: {variant_url[:80]}...")
+                                return
+                            
+                            audio_tracks = best_variant.get('audio_tracks', [])
                             print(f"\n🚀 Auto-downloading best quality: {best_variant.get('resolution', 'auto')}")
+                            if audio_tracks:
+                                print(f"🎵 Found {len(audio_tracks)} audio track(s)")
+                            else:
+                                print(f"⚠️  No separate audio tracks found in playlist")
                             
                             # Get page title for filename
                             page_title = await self.page.title() if hasattr(self, 'page') and self.page else ""
                             
-                            await self.auto_download(best_variant, self.headers, timestamp, url, page_title)
+                            # Mark as downloading
+                            self.downloading_urls.add(variant_url)
+                            try:
+                                # Check if we have captured audio URLs and video URL separately with fresh headers
+                                if self.audio_m3u8_urls:
+                                    print(f"🎵 Using {len(self.audio_m3u8_urls)} detected audio stream(s)")
+                                    # Override audio_tracks with detected URLs and their fresh headers
+                                    best_variant['audio_tracks'] = []
+                                    for audio_data in self.audio_m3u8_urls:
+                                        best_variant['audio_tracks'].append({
+                                            'url': audio_data['url'],
+                                            'headers': audio_data['headers'],
+                                            'language': 'hi',
+                                            'name': 'Hindi'
+                                        })
+                                
+                                # Use fresh video headers if we detected video M3U8
+                                if self.video_m3u8_urls:
+                                    print(f"📹 Using detected video stream with fresh headers")
+                                    video_data = self.video_m3u8_urls[0]  # Use first video stream
+                                    best_variant['url'] = video_data['url']
+                                    # Pass video-specific headers
+                                    await self.auto_download(best_variant, video_data['headers'], timestamp, url, page_title)
+                                else:
+                                    await self.auto_download(best_variant, self.headers, timestamp, url, page_title)
+                            finally:
+                                # Remove from downloading set when done
+                                self.downloading_urls.discard(variant_url)
                                 
                 except Exception as e:
                     print(f"⚠️  Error processing response: {e}")
@@ -180,10 +252,33 @@ class HotstarDownloader:
         }
     
     def parse_master_playlist(self, content, base_url):
-        """Parse M3U8 master playlist and extract quality variants"""
+        """Parse M3U8 master playlist and extract quality variants with audio"""
         variants = []
+        audio_tracks = []
         lines = content.split('\n')
         
+        # First pass: extract audio tracks
+        for i, line in enumerate(lines):
+            if line.startswith('#EXT-X-MEDIA:TYPE=AUDIO'):
+                # Parse audio track attributes
+                uri_match = re.search(r'URI="([^"]+)"', line)
+                group_id = re.search(r'GROUP-ID="([^"]+)"', line)
+                name = re.search(r'NAME="([^"]+)"', line)
+                language = re.search(r'LANGUAGE="([^"]+)"', line)
+                
+                if uri_match:
+                    audio_url = uri_match.group(1)
+                    if not audio_url.startswith('http'):
+                        audio_url = urljoin(base_url, audio_url)
+                    
+                    audio_tracks.append({
+                        'url': audio_url,
+                        'group_id': group_id.group(1) if group_id else 'audio',
+                        'name': name.group(1) if name else 'Unknown',
+                        'language': language.group(1) if language else 'und'
+                    })
+        
+        # Second pass: extract video variants
         for i, line in enumerate(lines):
             if line.startswith('#EXT-X-STREAM-INF:'):
                 # Parse attributes
@@ -191,6 +286,7 @@ class HotstarDownloader:
                 resolution = re.search(r'RESOLUTION=(\d+x\d+)', line)
                 codecs = re.search(r'CODECS="([^"]+)"', line)
                 frame_rate = re.search(r'FRAME-RATE=([\d.]+)', line)
+                audio_group = re.search(r'AUDIO="([^"]+)"', line)
                 
                 # Next line should be the variant URL
                 if i + 1 < len(lines):
@@ -200,16 +296,28 @@ class HotstarDownloader:
                         if not variant_url.startswith('http'):
                             variant_url = urljoin(base_url, variant_url)
                         
+                        # Find matching audio tracks
+                        matching_audio = []
+                        if audio_group:
+                            matching_audio = [a for a in audio_tracks if a['group_id'] == audio_group.group(1)]
+                        
                         variants.append({
                             'url': variant_url,
                             'bandwidth': int(bandwidth.group(1)) if bandwidth else 0,
                             'resolution': resolution.group(1) if resolution else 'unknown',
                             'codecs': codecs.group(1) if codecs else 'unknown',
-                            'frame_rate': float(frame_rate.group(1)) if frame_rate else 25.0
+                            'frame_rate': float(frame_rate.group(1)) if frame_rate else 25.0,
+                            'audio_tracks': matching_audio if matching_audio else audio_tracks[:1]  # Use first audio if no match
                         })
         
         # Sort by bandwidth (quality)
         variants.sort(key=lambda x: x['bandwidth'], reverse=True)
+        
+        # If no audio tracks found, add empty list to variants
+        if not audio_tracks:
+            for variant in variants:
+                variant['audio_tracks'] = []
+        
         return variants
     
     async def inject_download_ui(self, playlist_info):
@@ -500,10 +608,15 @@ class HotstarDownloader:
         print(f"📎 Source: {playlist_url[:80]}...")
         if page_title:
             print(f"📺 Title: {page_title}")
-        await self.download_with_ffmpeg(variant['url'], headers, output_path)
+        
+        # Extract audio URLs
+        audio_tracks = variant.get('audio_tracks', [])
+        audio_urls = [track['url'] for track in audio_tracks] if audio_tracks else None
+        
+        await self.download_with_ffmpeg(variant['url'], headers, output_path, audio_urls)
     
-    async def download_with_ffmpeg(self, variant_url, headers, output_path):
-        """Download video using ffmpeg"""
+    async def download_with_ffmpeg(self, variant_url, headers, output_path, audio_urls=None):
+        """Download video and audio separately, then merge with extensive validation"""
         # Build headers string for ffmpeg
         header_list = []
         for key, value in headers.items():
@@ -512,15 +625,280 @@ class HotstarDownloader:
         
         headers_str = '\r\n'.join(header_list) + '\r\n'
         
-        # FFmpeg command
+        # If no separate audio tracks, just download the video with embedded audio
+        if not audio_urls:
+            print(f"📹 Downloading video (with embedded audio)...")
+            cmd = [
+                'ffmpeg',
+                '-loglevel', 'info',
+                '-headers', headers_str,
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '5',
+                '-i', variant_url,
+                '-c', 'copy',
+                '-avoid_negative_ts', 'make_zero',
+                '-fflags', '+genpts+igndts',
+                '-max_muxing_queue_size', '1024',
+                '-movflags', '+faststart',
+                '-y',
+                str(output_path)
+            ]
+            
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode != 0:
+                    print(f"❌ Download failed with code {process.returncode}")
+                    print(stderr.decode()[-500:])
+                    return False
+                
+                file_size_mb = output_path.stat().st_size / (1024*1024)
+                print(f"✅ Download complete: {file_size_mb:.2f} MB")
+                
+                # Validate the file
+                print(f"🔍 Validating downloaded file...")
+                validation_result = await self.validate_merged_file(output_path)
+                
+                if validation_result['valid']:
+                    print(f"✅ Validation passed!")
+                    print(f"   Video: {validation_result['video_codec']} {validation_result['resolution']}")
+                    if validation_result['audio_count'] > 0:
+                        print(f"   Audio: {validation_result['audio_count']} track(s), {validation_result['audio_codec']}")
+                    else:
+                        print(f"   ⚠️  Audio: MISSING - Video downloaded but NO AUDIO STREAM!")
+                        print(f"   ⚠️  This video will have NO SOUND when played!")
+                    print(f"   Duration: {validation_result['duration']:.2f}s")
+                    return True
+                else:
+                    print(f"⚠️  Validation issues detected:")
+                    for issue in validation_result.get('issues', []):
+                        print(f"   ❌ {issue}")
+                    return False
+                    
+            except FileNotFoundError:
+                print("❌ ffmpeg not found! Install it:")
+                print("   Windows: choco install ffmpeg")
+                print("   Mac: brew install ffmpeg")
+                print("   Linux: apt install ffmpeg")
+                return False
+            except Exception as e:
+                print(f"❌ Download error: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        
+        # Separate audio/video download and merge
+        temp_dir = self.downloads_dir / "temp"
+        temp_dir.mkdir(exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        temp_video = temp_dir / f"video_{timestamp}.mp4"
+        temp_audio_files = []
+        
+        try:
+            # Download video stream
+            print(f"📹 Downloading video stream (without audio)...")
+            video_cmd = [
+                'ffmpeg',
+                '-loglevel', 'info',
+                '-headers', headers_str,
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '5',
+                '-i', variant_url,
+                '-c:v', 'copy',
+                '-an',  # No audio in video-only download
+                '-avoid_negative_ts', 'make_zero',
+                '-fflags', '+genpts+igndts',
+                '-max_muxing_queue_size', '1024',
+                '-y',
+                str(temp_video)
+            ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *video_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                print(f"❌ Video download failed with code {process.returncode}")
+                print(stderr.decode()[-500:])
+                return False
+            
+            video_size_mb = temp_video.stat().st_size / (1024*1024)
+            print(f"✅ Video downloaded: {video_size_mb:.2f} MB")
+            
+            # Download audio streams if available
+            if audio_urls:
+                for idx, audio_info in enumerate(audio_urls):
+                    audio_url = audio_info.get('url') if isinstance(audio_info, dict) else audio_info
+                    lang = audio_info.get('language', 'und') if isinstance(audio_info, dict) else 'und'
+                    
+                    # Use audio-specific headers if available, otherwise use video headers
+                    audio_headers_str = headers_str
+                    if isinstance(audio_info, dict) and 'headers' in audio_info:
+                        audio_header_list = []
+                        for key, value in audio_info['headers'].items():
+                            if key.lower() not in ['host', 'content-length', 'connection']:
+                                audio_header_list.append(f'{key}: {value}')
+                        audio_headers_str = '\r\n'.join(audio_header_list) + '\r\n'
+                    
+                    temp_audio = temp_dir / f"audio_{timestamp}_{idx}_{lang}.m4a"
+                    print(f"🎵 Downloading audio stream {idx+1}/{len(audio_urls)} ({lang})...")
+                    
+                    audio_cmd = [
+                        'ffmpeg',
+                        '-loglevel', 'info',
+                        '-headers', audio_headers_str,
+                        '-reconnect', '1',
+                        '-reconnect_streamed', '1',
+                        '-reconnect_delay_max', '5',
+                        '-i', audio_url,
+                        '-c:a', 'copy',
+                        '-vn',  # No video in audio-only download
+                        '-avoid_negative_ts', 'make_zero',
+                        '-fflags', '+genpts+igndts',
+                        '-max_muxing_queue_size', '1024',
+                        '-y',
+                        str(temp_audio)
+                    ]
+                    
+                    process = await asyncio.create_subprocess_exec(
+                        *audio_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    
+                    stdout, stderr = await process.communicate()
+                    
+                    if process.returncode == 0:
+                        audio_size_mb = temp_audio.stat().st_size / (1024*1024)
+                        print(f"✅ Audio {lang} downloaded: {audio_size_mb:.2f} MB")
+                        temp_audio_files.append((temp_audio, lang))
+                    else:
+                        print(f"⚠️  Audio {lang} download failed, continuing...")
+            
+            # Merge video and audio with careful synchronization
+            print(f"🔄 Merging video and audio streams...")
+            
+            if temp_audio_files:
+                # Build merge command with multiple audio tracks
+                merge_cmd = [
+                    'ffmpeg',
+                    '-loglevel', 'info',
+                    '-i', str(temp_video)
+                ]
+                
+                # Add all audio inputs
+                for audio_file, _ in temp_audio_files:
+                    merge_cmd.extend(['-i', str(audio_file)])
+                
+                # Map video stream
+                merge_cmd.extend(['-map', '0:v:0'])
+                
+                # Map all audio streams
+                for idx in range(len(temp_audio_files)):
+                    merge_cmd.extend(['-map', f'{idx+1}:a:0'])
+                
+                # Set metadata for audio tracks
+                for idx, (_, lang) in enumerate(temp_audio_files):
+                    merge_cmd.extend([f'-metadata:s:a:{idx}', f'language={lang}'])
+                
+                # Codec and sync options
+                merge_cmd.extend([
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    '-b:a', '192k',
+                    '-async', '1',  # Audio sync method
+                    '-vsync', '2',  # Video sync method
+                    '-avoid_negative_ts', 'make_zero',
+                    '-fflags', '+genpts+igndts',
+                    '-max_muxing_queue_size', '2048',
+                    '-movflags', '+faststart',  # Web optimization
+                    '-y',
+                    str(output_path)
+                ])
+                
+            else:
+                # No separate audio, just copy video (might have embedded audio)
+                merge_cmd = [
+                    'ffmpeg',
+                    '-loglevel', 'info',
+                    '-i', str(temp_video),
+                    '-c', 'copy',
+                    '-movflags', '+faststart',
+                    '-y',
+                    str(output_path)
+                ]
+            
+            process = await asyncio.create_subprocess_exec(
+                *merge_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
+                final_size_mb = output_path.stat().st_size / (1024*1024)
+                print(f"✅ Merge complete: {final_size_mb:.2f} MB")
+                
+                # Validate the merged file
+                print(f"🔍 Validating merged file...")
+                validation_result = await self.validate_merged_file(output_path)
+                
+                if validation_result['valid']:
+                    print(f"✅ Validation passed!")
+                    print(f"   Video: {validation_result['video_codec']} {validation_result['resolution']}")
+                    print(f"   Audio: {validation_result['audio_count']} track(s), {validation_result['audio_codec']}")
+                    print(f"   Duration: {validation_result['duration']:.2f}s")
+                    
+                    # Cleanup temp files
+                    self.cleanup_temp_files(temp_video, temp_audio_files)
+                    return True
+                else:
+                    print(f"⚠️  Validation issues detected:")
+                    for issue in validation_result.get('issues', []):
+                        print(f"   ❌ {issue}")
+                    
+                    # Keep temp files for debugging
+                    print(f"⚠️  Temp files preserved for debugging in: {temp_dir}")
+                    return False
+            else:
+                print(f"❌ Merge failed with code {process.returncode}")
+                print(stderr.decode()[-500:])
+                return False
+                
+        except FileNotFoundError:
+            print("❌ ffmpeg not found! Install it:")
+            print("   Windows: choco install ffmpeg")
+            print("   Mac: brew install ffmpeg")
+            print("   Linux: apt install ffmpeg")
+            return False
+        except Exception as e:
+            print(f"❌ Download error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    async def validate_merged_file(self, output_path):
+        """Validate merged video file for completeness and correctness"""
         cmd = [
-            'ffmpeg',
-            '-loglevel', 'info',
-            '-headers', headers_str,
-            '-i', variant_url,
-            '-c', 'copy',
-            '-bsf:a', 'aac_adtstoasc',
-            '-y',
+            'ffprobe',
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_format',
+            '-show_streams',
             str(output_path)
         ]
         
@@ -533,24 +911,70 @@ class HotstarDownloader:
             
             stdout, stderr = await process.communicate()
             
-            if process.returncode == 0:
-                size_mb = output_path.stat().st_size / (1024*1024)
-                print(f"✅ Download complete: {size_mb:.2f} MB")
-                return True
-            else:
-                print(f"❌ FFmpeg failed with code {process.returncode}")
-                print(stderr.decode()[-500:])  # Last 500 chars
-                return False
+            if process.returncode != 0:
+                return {'valid': False, 'issues': ['ffprobe failed']}
+            
+            data = json.loads(stdout.decode())
+            
+            issues = []
+            video_stream = None
+            audio_streams = []
+            
+            for stream in data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    video_stream = stream
+                elif stream.get('codec_type') == 'audio':
+                    audio_streams.append(stream)
+            
+            if not video_stream:
+                issues.append("No video stream found")
+            
+            # Audio is not mandatory if video might have embedded audio
+            # Only warn if completely no audio found
+            if not audio_streams:
+                # Check if this is expected (single stream download)
+                pass  # Not an error - video might have embedded audio
+            
+            # Check for sync issues only if we have separate audio
+            if video_stream and audio_streams:
+                video_duration = float(video_stream.get('duration', 0))
+                audio_duration = float(audio_streams[0].get('duration', 0))
                 
-        except FileNotFoundError:
-            print("❌ ffmpeg not found! Install it:")
-            print("   Windows: choco install ffmpeg")
-            print("   Mac: brew install ffmpeg")
-            print("   Linux: apt install ffmpeg")
-            return False
+                if abs(video_duration - audio_duration) > 1.0:  # 1 second tolerance
+                    issues.append(f"Audio/Video sync issue: video={video_duration:.2f}s, audio={audio_duration:.2f}s")
+            
+            format_info = data.get('format', {})
+            total_duration = float(format_info.get('duration', 0))
+            
+            if total_duration < 1.0:
+                issues.append(f"File too short: {total_duration}s")
+            
+            return {
+                'valid': len(issues) == 0,
+                'issues': issues,
+                'video_codec': video_stream.get('codec_name', 'unknown') if video_stream else 'none',
+                'audio_codec': audio_streams[0].get('codec_name', 'unknown') if audio_streams else 'none',
+                'audio_count': len(audio_streams),
+                'duration': total_duration,
+                'resolution': f"{video_stream.get('width', 0)}x{video_stream.get('height', 0)}" if video_stream else 'unknown'
+            }
+            
         except Exception as e:
-            print(f"❌ Download error: {e}")
-            return False
+            return {'valid': False, 'issues': [f'Validation error: {e}']}
+    
+    def cleanup_temp_files(self, temp_video, temp_audio_files):
+        """Clean up temporary files after successful merge"""
+        try:
+            if temp_video.exists():
+                temp_video.unlink()
+            
+            for audio_file, _ in temp_audio_files:
+                if audio_file.exists():
+                    audio_file.unlink()
+            
+            print(f"🗑️  Cleaned up temporary files")
+        except Exception as e:
+            print(f"⚠️  Cleanup warning: {e}")
     
     async def run(self, url, headless=False):
         """Main entry point - open browser and monitor"""
@@ -730,21 +1154,26 @@ async def main():
     import sys
     
     if len(sys.argv) < 2:
-        print("Usage: python hotstar_auto_downloader.py <hotstar_url> [--headless]")
+        print("Usage: python hotstar_auto_downloader.py <hotstar_url> [--headless] [--reset-profile]")
         print("\nExample:")
         print('  python hotstar_auto_downloader.py "https://www.hotstar.com/in/shows/..." ')
         print('  python hotstar_auto_downloader.py "https://www.hotstar.com/in/shows/..." --headless')
+        print('  python hotstar_auto_downloader.py "https://www.hotstar.com/in/shows/..." --reset-profile')
         print("\nFeatures:")
         print("  • Automatically detects M3U8 master playlists")
         print("  • Injects download UI into webpage (top-left corner)")
         print("  • Select quality and click Download")
         print("  • Downloads with ffmpeg, preserves quality")
+        print("\nOptions:")
+        print("  --headless       Run browser in headless mode")
+        print("  --reset-profile  Reset Firefox profile on each launch (fresh browser state)")
         sys.exit(1)
     
     url = sys.argv[1]
     headless = '--headless' in sys.argv
+    reset_profile = '--reset-profile' in sys.argv
     
-    downloader = HotstarDownloader(downloads_dir='downloads')
+    downloader = HotstarDownloader(downloads_dir='downloads', reset_profile=reset_profile)
     await downloader.run(url, headless=headless)
 
 

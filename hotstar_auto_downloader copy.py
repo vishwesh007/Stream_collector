@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """
 Hotstar Auto Downloader with Playwright
 Monitors network traffic, detects M3U8 playlists, injects download UI
 """
-
+# automatic download of best quality variant using ffmpeg
 import asyncio
 import json
 import re

@@ -9,6 +9,8 @@ import json
 import re
 import subprocess
 import os
+import tempfile
+import shutil
 from datetime import datetime
 from pathlib import Path
 from playwright.async_api import async_playwright, Page, Route, Response
@@ -24,35 +26,52 @@ class HotstarDownloader:
         self.headers = {}
         self.cookies = {}
         self.page_url = ""
+        self.profile_dir = Path(tempfile.gettempdir()) / "hotstar_firefox_profile"
         self.extensions_dir = Path("browser_extensions")
         self.extensions_dir.mkdir(exist_ok=True)
     
-    def download_adguard_extension(self):
-        """Download AdGuard extension for Firefox"""
-        adguard_xpi = self.extensions_dir / "adguard.xpi"
+    def download_ublock_extension(self):
+        """Download uBlock Origin XPI for Firefox"""
+        ublock_xpi = self.extensions_dir / "ublock_origin.xpi"
         
-        if adguard_xpi.exists():
-            print("✅ AdGuard extension already downloaded")
-            return str(adguard_xpi)
+        if ublock_xpi.exists():
+            print("✅ uBlock Origin already downloaded")
+            return str(ublock_xpi)
         
-        print("📥 Downloading AdGuard extension...")
+        print("📥 Downloading uBlock Origin extension...")
         
-        # AdGuard Firefox extension URL (latest version)
-        adguard_url = "https://cdn.adguard.com/public/Userscripts/AdguardAssistant/2.3/assistant.user.js"
-        
-        # Alternative: Use uBlock Origin instead (more reliable download)
+        # uBlock Origin direct XPI download
         ublock_url = "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
         
         try:
-            # Download uBlock Origin (better alternative for Firefox)
-            urllib.request.urlretrieve(ublock_url, adguard_xpi)
-            print(f"✅ Downloaded ad blocker to: {adguard_xpi}")
-            return str(adguard_xpi)
+            urllib.request.urlretrieve(ublock_url, ublock_xpi)
+            print(f"✅ Downloaded uBlock Origin to: {ublock_xpi}")
+            return str(ublock_xpi)
         except Exception as e:
             print(f"⚠️  Failed to download extension: {e}")
-            print("   Continuing without extension...")
+            return None
+    
+    def setup_firefox_profile_with_extension(self, extension_path):
+        """Create a Firefox profile and install extension"""
+        if not extension_path or not Path(extension_path).exists():
+            print("⚠️  No extension to install")
             return None
         
+        # Create profile directory
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create extensions directory in profile
+        extensions_profile_dir = self.profile_dir / "extensions"
+        extensions_profile_dir.mkdir(exist_ok=True)
+        
+        # Copy extension to profile extensions directory
+        # Firefox expects extensions with their ID as filename
+        extension_dest = extensions_profile_dir / "uBlock0@raymondhill.net.xpi"
+        shutil.copy2(extension_path, extension_dest)
+        
+        print(f"✅ Installed uBlock Origin to Firefox profile: {self.profile_dir}")
+        return str(self.profile_dir)
+    
     async def monitor_network(self, response: Response):
         """Monitor all network responses for M3U8 playlists"""
         try:
@@ -539,57 +558,145 @@ class HotstarDownloader:
             print("🚀 Starting Hotstar Auto Downloader...")
             print(f"📺 Target URL: {url}")
             
-            # Download AdGuard/uBlock extension
-            extension_path = self.download_adguard_extension()
+            # Download and install uBlock Origin extension
+            extension_path = self.download_ublock_extension()
+            profile_path = self.setup_firefox_profile_with_extension(extension_path)
             
             # Start download server
             runner = await self.start_download_server()
             
             try:
-                # Launch browser with DRM support and AdGuard
-                launch_options = {
-                    'headless': headless,
-                    'firefox_user_prefs': {
-                        # Enable DRM/Widevine
-                        'media.eme.enabled': True,
-                        'media.gmp-widevinecdm.enabled': True,
-                        'media.gmp-widevinecdm.visible': True,
-                        'media.gmp-manager.updateEnabled': True,
-                        # Additional media settings
-                        'media.autoplay.default': 0,
-                        'media.autoplay.blocking_policy': 0,
-                        # AdGuard settings
-                        'privacy.trackingprotection.enabled': True,
-                        'privacy.trackingprotection.socialtracking.enabled': True,
-                        'privacy.trackingprotection.cryptomining.enabled': True,
-                        'privacy.trackingprotection.fingerprinting.enabled': True,
-                        # Block ads via content blocking
-                        'browser.contentblocking.category': 'strict',
-                        'privacy.annotate_channels.strict_list.enabled': True,
-                    },
-                    'args': [
-                        '--start-maximized',
-                    ]
+                # Browser preferences
+                firefox_prefs = {
+                    # Enable DRM/Widevine
+                    'media.eme.enabled': True,
+                    'media.gmp-widevinecdm.enabled': True,
+                    'media.gmp-widevinecdm.visible': True,
+                    'media.gmp-manager.updateEnabled': True,
+                    # Additional media settings
+                    'media.autoplay.default': 0,
+                    'media.autoplay.blocking_policy': 0,
+                    # Enhanced ad blocking settings
+                    'privacy.trackingprotection.enabled': True,
+                    'privacy.trackingprotection.pbmode.enabled': True,
+                    'privacy.trackingprotection.socialtracking.enabled': True,
+                    'privacy.trackingprotection.cryptomining.enabled': True,
+                    'privacy.trackingprotection.fingerprinting.enabled': True,
+                    'browser.contentblocking.category': 'strict',
+                    'privacy.annotate_channels.strict_list.enabled': True,
+                    # Extension support
+                    'xpinstall.signatures.required': False,
+                    'extensions.autoDisableScopes': 0,
+                    'extensions.enabledScopes': 15,
                 }
                 
-                # Add extension if downloaded successfully
-                if extension_path:
-                    launch_options['args'].append(f'--load-extension={extension_path}')
-                    print("✅ Ad blocker extension will be loaded")
-                
-                browser = await p.firefox.launch(**launch_options)
-                
-                print("✅ AdGuard-style ad blocking enabled")
-                
-                # Mobile emulation (iPhone 12 Pro) with DRM permissions
-                context = await browser.new_context(
-                    device_scale_factor=3,
-                    has_touch=True,
-                    user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
-                )
+                # Launch browser with persistent context (required for extensions)
+                if profile_path:
+                    context = await p.firefox.launch_persistent_context(
+                        user_data_dir=str(profile_path),
+                        headless=headless,
+                        firefox_user_prefs=firefox_prefs,
+                        device_scale_factor=3,
+                        has_touch=True,
+                        user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
+                        args=['--start-maximized']
+                    )
+                    print("✅ Firefox launched with uBlock Origin extension")
+                    print("✅ Enhanced ad blocking enabled (Firefox Tracking Protection + uBlock Origin)")
+                else:
+                    # Fallback without profile
+                    browser = await p.firefox.launch(
+                        headless=headless,
+                        firefox_user_prefs=firefox_prefs,
+                        args=['--start-maximized']
+                    )
+                    context = await browser.new_context(
+                        device_scale_factor=3,
+                        has_touch=True,
+                        user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
+                    )
+                    print("✅ Firefox launched (without extension)")
                 
                 self.page = await context.new_page()
                 self.page_url = url
+                
+                # Inject aggressive ad blocker script
+                await self.page.add_init_script("""
+                    // Block common ad domains and trackers
+                    const adDomains = [
+                        'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
+                        'amazon-adsystem.com', 'advertising.com', 'adbrite.com',
+                        'adnxs.com', 'adsrvr.org', 'criteo.com', 'outbrain.com',
+                        'taboola.com', 'smartadserver.com', 'pubmatic.com'
+                    ];
+                    
+                    // Override fetch and XMLHttpRequest to block ad requests
+                    const originalFetch = window.fetch;
+                    window.fetch = function(...args) {
+                        const url = args[0];
+                        if (typeof url === 'string' && adDomains.some(domain => url.includes(domain))) {
+                            console.log('🚫 Blocked ad request:', url);
+                            return Promise.reject(new Error('Ad blocked'));
+                        }
+                        return originalFetch.apply(this, args);
+                    };
+                    
+                    const originalOpen = XMLHttpRequest.prototype.open;
+                    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+                        if (adDomains.some(domain => url.includes(domain))) {
+                            console.log('🚫 Blocked XHR ad request:', url);
+                            return;
+                        }
+                        return originalOpen.call(this, method, url, ...rest);
+                    };
+                    
+                    // Remove ad elements from DOM
+                    function removeAds() {
+                        const adSelectors = [
+                            '[class*="ad-"]', '[id*="ad-"]', '[class*="advertisement"]',
+                            '[id*="advertisement"]', '.ad', '#ad', 'iframe[src*="doubleclick"]',
+                            'iframe[src*="googlesyndication"]', '[data-ad-slot]'
+                        ];
+                        
+                        adSelectors.forEach(selector => {
+                            document.querySelectorAll(selector).forEach(el => {
+                                if (el && el.parentNode) {
+                                    el.parentNode.removeChild(el);
+                                }
+                            });
+                        });
+                    }
+                    
+                    // Run ad removal on load and periodically
+                    if (document.readyState === 'loading') {
+                        document.addEventListener('DOMContentLoaded', removeAds);
+                    } else {
+                        removeAds();
+                    }
+                    setInterval(removeAds, 2000);
+                """)
+                
+                print("✅ JavaScript ad blocker injected")
+                
+                # Block ad requests at network level
+                async def route_handler(route):
+                    url = route.request.url
+                    ad_patterns = [
+                        'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
+                        'amazon-adsystem.com', 'advertising.com', 'adbrite.com',
+                        'adnxs.com', 'adsrvr.org', 'criteo.com', 'outbrain.com',
+                        'taboola.com', 'smartadserver.com', 'pubmatic.com',
+                        '/ads/', '/advertisement/', '/tracking/', '/analytics/'
+                    ]
+                    
+                    if any(pattern in url for pattern in ad_patterns):
+                        print(f"🚫 Blocked: {url[:80]}...")
+                        await route.abort()
+                    else:
+                        await route.continue_()
+                
+                await self.page.route('**/*', route_handler)
+                print("✅ Network-level ad blocking enabled")
                 
                 # Set up network monitoring
                 self.page.on('response', lambda response: asyncio.create_task(self.monitor_network(response)))
@@ -614,7 +721,7 @@ class HotstarDownloader:
                 except:
                     pass
                 try:
-                    await browser.close()
+                    await context.close()
                 except:
                     pass
 
